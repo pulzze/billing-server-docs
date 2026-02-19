@@ -17,6 +17,10 @@ This guide explains how to integrate your application with the Billing Server fo
 11. [Payment Methods](#payment-methods)
 12. [Webhooks](#webhooks)
 13. [Best Practices](#best-practices)
+14. [Per-User Allocations](#per-user-allocations)
+15. [Balance-Type Metrics](#balance-type-metrics)
+16. [Per-User Usage Tracking](#per-user-usage-tracking)
+17. [Service-to-Service Authentication](#service-to-service-authentication)
 
 ---
 
@@ -203,6 +207,93 @@ POST /api/usage
 
 ---
 
+## Integration Modes
+
+The Billing Server supports two modes of operation for usage reporting and limit checking. Choose based on your application's needs.
+
+### Direct Mode (Subscription-Specific)
+
+Use when you track subscription IDs in your application.
+
+**Usage Reporting:**
+```json
+POST /api/usage
+{
+  "subscription_id": "sub_abc123",
+  "metric_id": "metric_messages",
+  "count": 1
+}
+```
+
+**Limit Checking:**
+```json
+GET /api/limits?subscription_id=sub_abc123
+```
+
+**Best for:**
+- Applications that manage subscriptions directly
+- When you need fine-grained control over which subscription is billed
+
+### Subscriber Mode (Automatic Routing)
+
+Use when you want the Billing Server to determine the correct subscription. The server finds the subscriber's active subscription that includes the specified metric.
+
+**Usage Reporting:**
+```json
+POST /api/usage
+{
+  "subscriber_id": "user_123",
+  "metric_name": "messages_per_day",
+  "count": 1
+}
+```
+
+**Limit Checking:**
+```json
+GET /api/limits?subscriber_id=user_123
+```
+
+**Best for:**
+- Applications that don't track subscription IDs
+- Subscribers with multiple subscriptions (base plan + add-ons)
+- Simpler integration with less state management
+
+### Multiple Subscriptions
+
+Subscribers can have multiple active subscriptions (e.g., a base plan plus add-on plans). When using Subscriber Mode:
+
+1. **Usage reporting** routes to the subscription whose plan includes the specified metric
+2. **Limit checking** aggregates limits across all active subscriptions
+
+**Example Response (Multiple Subscriptions):**
+```json
+GET /api/limits?subscriber_id=user_123
+
+{
+  "subscriber_id": "user_123",
+  "limits": {
+    "messages_per_day": {
+      "subscription_id": "sub_base",
+      "limit": 100,
+      "used": 45,
+      "remaining": 55,
+      "type": "soft"
+    },
+    "premium_features": {
+      "subscription_id": "sub_addon",
+      "limit": 50,
+      "used": 10,
+      "remaining": 40,
+      "type": "hard"
+    }
+  }
+}
+```
+
+Each metric shows which subscription provides that limit.
+
+---
+
 ## API Reference
 
 ### Plans
@@ -347,44 +438,141 @@ GET /api/metrics
 
 Returns all metrics registered by your application.
 
+#### Sync Metrics (Recommended)
+
+```
+POST /api/vendor/metrics/sync
+```
+
+Syncs your application's metric definitions with the billing server. This is the recommended way to manage metrics during deployment.
+
+**Request:**
+```json
+{
+  "metrics": [
+    {
+      "name": "capability_calls",
+      "display_name": "API Capability Calls",
+      "unit_label": "calls",
+      "description": "Total capability executions"
+    },
+    {
+      "name": "llm_costs",
+      "display_name": "LLM API Costs",
+      "unit_label": "USD",
+      "description": "OpenAI/LLM token costs"
+    }
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "results": {
+    "created": [
+      {"name": "capability_calls", "id": "metric_abc123"}
+    ],
+    "updated": [
+      {"name": "llm_costs", "id": "metric_def456", "changes": ["description"]}
+    ],
+    "unchanged": [],
+    "deprecated": [],
+    "blocked": []
+  },
+  "sync_successful": true,
+  "warnings": []
+}
+```
+
+**Sync Behavior:**
+
+| Change Type | Active Plans Reference It? | Result |
+|-------------|---------------------------|--------|
+| Add new metric | N/A | ✅ Created |
+| Update `display_name` | Any | ✅ Updated (cosmetic) |
+| Update `description` | Any | ✅ Updated (cosmetic) |
+| Update `unit_label` | No | ✅ Updated |
+| Update `unit_label` | Yes | ❌ Blocked |
+| Remove metric | No active subscriptions | ✅ Deprecated |
+| Remove metric | Has active subscriptions | ❌ Blocked |
+
+**Best Practices:**
+- Define metrics in your application code (source of truth)
+- Run sync during deployment (`mix billing.sync_metrics`)
+- Check `sync_successful` to fail deployments on breaking changes
+- Deprecated metrics continue to work for existing subscriptions
+
 ---
 
 ### Limits
 
 #### Get Effective Limits
 
+**Query Parameters (choose one):**
+
+| Parameter | Mode | Description |
+|-----------|------|-------------|
+| `subscription_id` | Direct | Get limits for a specific subscription |
+| `subscriber_id` | Subscriber | Get aggregated limits across all active subscriptions |
+| *(none)* | Subscriber | Uses the authenticated token's identity |
+
+**Direct Mode:**
 ```
-GET /api/limits?subscriber_id={subscriber_id}
+GET /api/limits?subscription_id=sub_abc123
 ```
 
-Returns the current effective limits for a subscriber, including any active overrides.
+**Subscriber Mode:**
+```
+GET /api/limits?subscriber_id=user_123
+```
 
-Response:
+Returns the current effective limits, including any active overrides.
+
+**Response (Subscriber Mode with multiple subscriptions):**
 ```json
 {
   "subscriber_id": "user_123",
-  "subscription_id": "sub_abc",
   "limits": {
     "messages_per_day": {
+      "subscription_id": "sub_base",
+      "metric_id": "metric_messages",
+      "metric_name": "messages_per_day",
       "limit": 100,
       "used": 45,
       "remaining": 55,
-      "type": "soft",
-      "exceeded": false,
-      "resets_at": "2024-01-16T00:00:00Z"
+      "limit_type": "soft",
+      "recheck_after": 300
     },
-    "messages_per_minute": {
-      "limit": 2,
-      "used": 0,
-      "remaining": 2,
-      "type": "hard",
-      "exceeded": false,
-      "resets_at": "2024-01-15T10:31:00Z",
-      "override_active": true,
-      "override_reason": "messages_per_day exceeded 100%"
+    "premium_api_calls": {
+      "subscription_id": "sub_addon",
+      "metric_id": "metric_premium",
+      "metric_name": "premium_api_calls",
+      "limit": 50,
+      "used": 10,
+      "remaining": 40,
+      "limit_type": "hard",
+      "recheck_after": 60
     }
-  },
-  "recheck_after": 50
+  }
+}
+```
+
+**Response (Direct Mode):**
+```json
+{
+  "subscription_id": "sub_abc",
+  "limits": [
+    {
+      "metric_id": "metric_messages",
+      "metric_name": "messages_per_day",
+      "limit": 100,
+      "used": 45,
+      "remaining": 55,
+      "limit_type": "soft",
+      "recheck_after": 300
+    }
+  ]
 }
 ```
 
@@ -412,21 +600,38 @@ Response:
 POST /api/usage
 ```
 
-Request (count-based):
+**Two modes of operation:**
+
+| Mode | Required Parameters | Description |
+|------|---------------------|-------------|
+| Direct | `subscription_id` + `metric_id` | You specify which subscription and metric |
+| Subscriber | `subscriber_id` + `metric_name` | Server routes to the correct subscription |
+
+**Direct Mode (subscription_id + metric_id):**
 ```json
 {
-  "subscriber_id": "user_123",
-  "metric": "messages_per_day",
+  "subscription_id": "sub_abc123",
+  "metric_id": "metric_messages",
   "count": 1,
   "idempotency_key": "req_abc123"
 }
 ```
 
-Request (passthrough cost):
+**Subscriber Mode (subscriber_id + metric_name):**
 ```json
 {
   "subscriber_id": "user_123",
-  "metric": "llm_costs",
+  "metric_name": "messages_per_day",
+  "count": 1,
+  "idempotency_key": "req_abc123"
+}
+```
+
+**Passthrough cost (Subscriber Mode):**
+```json
+{
+  "subscriber_id": "user_123",
+  "metric_name": "llm_costs",
   "cost": 0.0847,
   "metadata": {
     "model": "gpt-4",
@@ -437,26 +642,24 @@ Request (passthrough cost):
 }
 ```
 
-Response:
+**Response:**
 ```json
 {
-  "id": "usage_evt_123",
-  "subscriber_id": "user_123",
-  "metric": "messages_per_day",
-  "count": 1,
-  "recorded_at": "2024-01-15T10:30:45Z",
-  "limits": {
-    "messages_per_day": {
-      "limit": 100,
-      "used": 46,
-      "remaining": 54,
-      "type": "soft",
-      "exceeded": false
-    }
+  "data": {
+    "id": "usage_evt_123",
+    "subscription_id": "sub_abc123",
+    "metric_id": "metric_messages",
+    "count": 1,
+    "reported_at": "2024-01-15T10:30:45Z"
   },
-  "recheck_after": 50
+  "routed_to": {
+    "subscription_id": "sub_abc123",
+    "metric_id": "metric_messages"
+  }
 }
 ```
+
+The `routed_to` field shows which subscription and metric the usage was recorded against (useful for Subscriber Mode).
 
 **Idempotency:**
 
@@ -1503,6 +1706,610 @@ await client.reportUsage({
   idempotencyKey: 'req_abc123'
 });
 ```
+
+---
+
+---
+
+## Per-User Allocations
+
+Allocations allow you to set individual limits or credit balances for your end users within a subscription. This is useful for:
+
+- **Multi-tenant applications**: Each of your customers' users gets their own quota
+- **Team management**: Different team members have different limits
+- **Prepaid credits**: Assign credits to individual users
+
+### Allocation Types
+
+| Type | Description | Use Case |
+|------|-------------|----------|
+| **Limit** | Traditional usage limits that reset each billing period | "User X gets 100 API calls/day" |
+| **Balance** | Prepaid credits that decrement with usage | "User X has 500 tokens to spend" |
+
+### Creating an Allocation
+
+```
+POST /api/subscriptions/{subscription_id}/allocations
+```
+
+**Limit-type allocation:**
+```json
+{
+  "external_user_id": "user_123",
+  "metric_name": "api_calls",
+  "allocation_type": "limit",
+  "limit": 1000,
+  "limit_type": "hard"
+}
+```
+
+**Balance-type allocation:**
+```json
+{
+  "external_user_id": "user_123",
+  "metric_name": "credits",
+  "allocation_type": "balance",
+  "balance": 500,
+  "low_balance_threshold": 50
+}
+```
+
+Response:
+```json
+{
+  "data": {
+    "id": "alloc_abc123",
+    "subscription_id": "sub_xyz",
+    "metric_id": "metric_123",
+    "external_user_id": "user_123",
+    "allocation_type": "limit",
+    "limit": 1000,
+    "limit_type": "hard",
+    "created_at": "2024-01-15T10:30:00Z"
+  }
+}
+```
+
+### Listing Allocations
+
+```
+GET /api/subscriptions/{subscription_id}/allocations
+```
+
+Query parameters:
+- `external_user_id` - Filter by user (optional)
+- `metric_name` or `metric_id` - Filter by metric (optional)
+
+### Updating an Allocation
+
+```
+PUT /api/subscriptions/{subscription_id}/allocations/{external_user_id}?metric_name={metric_name}
+```
+
+```json
+{
+  "limit": 2000
+}
+```
+
+### Deleting an Allocation
+
+```
+DELETE /api/subscriptions/{subscription_id}/allocations/{external_user_id}?metric_name={metric_name}
+```
+
+### Checking Per-User Limits
+
+When checking limits, include the `external_user_id` to get both subscription and allocation limits:
+
+```
+GET /api/limits?subscription_id={subscription_id}&external_user_id={user_123}
+```
+
+Response:
+```json
+{
+  "data": {
+    "subscription_id": "sub_xyz",
+    "external_user_id": "user_123",
+    "limits": [
+      {
+        "metric_id": "metric_api",
+        "metric_name": "api_calls",
+        "limit": 10000,
+        "limit_type": "soft",
+        "used": 500,
+        "remaining": 9500,
+        "allocation": {
+          "allocation_type": "limit",
+          "limit": 1000,
+          "limit_type": "hard",
+          "used": 50,
+          "remaining": 950
+        }
+      }
+    ]
+  }
+}
+```
+
+The response includes both:
+- **Subscription-level limits**: Apply to the entire subscription
+- **Allocation limits**: Apply specifically to this user
+
+Both limits must pass for the request to be allowed.
+
+---
+
+## Balance-Type Metrics
+
+Balance-type metrics are prepaid credits that decrement with usage, rather than limits that reset each billing period.
+
+### Metric Types
+
+| Type | Behavior | Example |
+|------|----------|---------|
+| **Limit** | Usage accumulates and resets each period | "100 API calls/month" |
+| **Balance** | Credits decrement with each use | "500 tokens to spend" |
+
+### Creating Balance Metrics
+
+When registering metrics, specify the type:
+
+```json
+POST /api/vendor/metrics
+{
+  "name": "ai_credits",
+  "display_name": "AI Credits",
+  "metric_type": "balance",
+  "unit_label": "credits"
+}
+```
+
+### Configuring Balance in Plans
+
+Plan metrics for balance-type metrics include:
+
+```json
+{
+  "metric_id": "metric_credits",
+  "initial_balance": 1000,
+  "low_balance_threshold": 100,
+  "allow_negative": false,
+  "pricing_type": "per_unit",
+  "unit_price": "0.01"
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `initial_balance` | Starting balance when subscription is created |
+| `low_balance_threshold` | Triggers low balance warnings |
+| `allow_negative` | Whether balance can go negative |
+| `max_negative` | Maximum negative balance allowed (if `allow_negative` is true) |
+
+### Checking Balance
+
+Balance appears in the limits response with `metric_type: "balance"`:
+
+```json
+{
+  "limits": [
+    {
+      "metric_id": "metric_credits",
+      "metric_name": "ai_credits",
+      "metric_type": "balance",
+      "balance": 750,
+      "low_balance_threshold": 100,
+      "is_low": false,
+      "allowed": true
+    }
+  ]
+}
+```
+
+### Adding Credits
+
+Add credits to a subscription's balance:
+
+```
+POST /api/subscriptions/{subscription_id}/credits
+```
+
+```json
+{
+  "metric_name": "ai_credits",
+  "amount": 500,
+  "reason": "purchase",
+  "idempotency_key": "purchase_123"
+}
+```
+
+| Reason | Description |
+|--------|-------------|
+| `purchase` | Customer bought credits |
+| `grant` | Free credits (promotion, compensation) |
+| `refund` | Refund from previous charge |
+
+Response:
+```json
+{
+  "data": {
+    "subscription_id": "sub_xyz",
+    "metric_id": "metric_credits",
+    "amount": 500,
+    "balance_after": 1250,
+    "transaction_id": "txn_abc123"
+  }
+}
+```
+
+### Viewing Balance Transactions
+
+```
+GET /api/subscriptions/{subscription_id}/transactions?metric_name=ai_credits
+```
+
+Response:
+```json
+{
+  "data": [
+    {
+      "id": "txn_abc123",
+      "transaction_type": "credit",
+      "amount": 500,
+      "balance_before": 750,
+      "balance_after": 1250,
+      "reason": "purchase",
+      "created_at": "2024-01-15T10:30:00Z"
+    },
+    {
+      "id": "txn_def456",
+      "transaction_type": "debit",
+      "amount": 10,
+      "balance_before": 1260,
+      "balance_after": 1250,
+      "reason": "usage",
+      "reference_type": "usage_event",
+      "reference_id": "usage_xyz",
+      "created_at": "2024-01-15T10:25:00Z"
+    }
+  ]
+}
+```
+
+### Balance Deduction
+
+Balance is automatically deducted when you report usage for a balance-type metric:
+
+```json
+POST /api/usage
+{
+  "subscriber_id": "user_123",
+  "metric_name": "ai_credits",
+  "count": 10
+}
+```
+
+Response includes the remaining balance:
+```json
+{
+  "data": {
+    "id": "usage_xyz",
+    "subscription_id": "sub_abc",
+    "metric_id": "metric_credits",
+    "count": 10,
+    "balance_remaining": 1240
+  }
+}
+```
+
+### Allocation Balance Credits
+
+For balance-type allocations, add credits to a specific user:
+
+```
+POST /api/subscriptions/{subscription_id}/allocations/{external_user_id}/credits
+```
+
+```json
+{
+  "metric_name": "ai_credits",
+  "amount": 100,
+  "reason": "grant"
+}
+```
+
+---
+
+## Per-User Usage Tracking
+
+Track usage at the individual user level by including `external_user_id` in usage reports.
+
+### Reporting Per-User Usage
+
+Include the `external_user_id` parameter to attribute usage to a specific end user:
+
+```json
+POST /api/usage
+{
+  "subscriber_id": "org_123",
+  "metric_name": "api_calls",
+  "count": 1,
+  "external_user_id": "user_456",
+  "idempotency_key": "req_abc123"
+}
+```
+
+### Batch Reporting with Users
+
+```json
+POST /api/usage/batch
+{
+  "events": [
+    {
+      "subscriber_id": "org_123",
+      "metric_name": "api_calls",
+      "count": 5,
+      "external_user_id": "user_alice",
+      "idempotency_key": "batch_1"
+    },
+    {
+      "subscriber_id": "org_123",
+      "metric_name": "api_calls",
+      "count": 3,
+      "external_user_id": "user_bob",
+      "idempotency_key": "batch_2"
+    }
+  ]
+}
+```
+
+### Dual-Level Limit Checking
+
+When checking limits with `external_user_id`, both subscription and allocation limits are enforced:
+
+```
+GET /api/limits?subscription_id=sub_xyz&external_user_id=user_456
+```
+
+**Enforcement flow:**
+1. Check subscription-level limit → If exceeded, block
+2. Check user allocation limit (if exists) → If exceeded, block
+3. Both pass → Allow
+
+### Usage Summary by User
+
+Query usage grouped by user:
+
+```
+GET /api/usage/summary?subscription_id=sub_xyz&group_by=external_user_id&metric_name=api_calls
+```
+
+Response:
+```json
+{
+  "data": [
+    {
+      "external_user_id": "user_alice",
+      "metric_id": "metric_api",
+      "total_count": 1500,
+      "total_cost": "15.00"
+    },
+    {
+      "external_user_id": "user_bob",
+      "metric_id": "metric_api",
+      "total_count": 800,
+      "total_cost": "8.00"
+    }
+  ]
+}
+```
+
+### Integration Example
+
+Here's how to integrate per-user billing in your application:
+
+```python
+# 1. User sends a request
+user_id = request.headers.get("X-User-ID")  # Your user identifier
+account_id = get_account_from_token(request)
+
+# 2. Check limits (both subscription and user allocation)
+limits = billing_client.get_limits_for_user(
+    subscription_id=get_subscription(account_id),
+    external_user_id=user_id
+)
+
+# 3. Enforce limits
+api_limit = find_metric(limits, "api_calls")
+if api_limit.get("allocation"):
+    # User has a specific allocation
+    if api_limit["allocation"]["remaining"] <= 0:
+        return error_response(429, "User quota exceeded")
+elif api_limit["remaining"] <= 0:
+    return error_response(429, "Subscription limit exceeded")
+
+# 4. Process the request
+result = process_request(request)
+
+# 5. Report usage with user attribution
+billing_client.report_usage(
+    subscriber_id=account_id,
+    metric_name="api_calls",
+    count=1,
+    external_user_id=user_id,
+    idempotency_key=request.id
+)
+
+return result
+```
+
+---
+
+## Service-to-Service Authentication
+
+For backend services that need to manage subscriptions on behalf of their users (e.g., auto-provisioning subscriptions when users sign up), the Billing Server supports **trusted service authentication**.
+
+### When to Use
+
+Use service-to-service authentication when:
+- Your application needs to create subscriptions programmatically
+- You want to auto-provision subscriptions for new users/organizations
+- Your service needs to check subscription status without user tokens
+
+### How It Works
+
+1. Your service authenticates with Account Server using its own OAuth credentials
+2. Your service calls the Billing Server with its JWT
+3. The Billing Server validates that your service is in the trusted services list
+4. Operations are scoped to public plans or your organization's own plans
+
+### Prerequisites
+
+Your application must be registered as a **trusted service** with the Billing Server. Contact your administrator to add your application to the trusted services list.
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/service/subscriptions` | POST | Create subscription for a subscriber |
+| `/api/service/subscriptions/check` | GET | Check if subscriber has active subscription |
+
+### Creating a Subscription
+
+```bash
+POST /api/service/subscriptions
+Authorization: Bearer <your_service_jwt>
+Content-Type: application/json
+
+{
+  "subscriber_id": "org_xyz789",
+  "subscriber_type": "organization",
+  "plan_id": "plan_abc123"
+}
+```
+
+**Request Fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `subscriber_id` | Yes | The user or organization ID to subscribe |
+| `subscriber_type` | Yes | Either `"user"` or `"organization"` |
+| `plan_id` | Yes | The plan to subscribe to |
+
+**Response:**
+```json
+{
+  "data": {
+    "id": "sub_new123",
+    "subscriber_id": "org_xyz789",
+    "subscriber_type": "organization",
+    "plan_id": "plan_abc123",
+    "status": "active",
+    "current_period_start": "2024-01-15T00:00:00Z",
+    "current_period_end": "2024-02-15T00:00:00Z"
+  }
+}
+```
+
+### Checking Subscription Status
+
+```bash
+GET /api/service/subscriptions/check?subscriber_id=org_xyz789&subscriber_type=organization
+Authorization: Bearer <your_service_jwt>
+```
+
+**Response (has subscription):**
+```json
+{
+  "has_subscription": true,
+  "subscription": {
+    "id": "sub_abc123",
+    "plan_id": "plan_xyz",
+    "status": "active"
+  }
+}
+```
+
+**Response (no subscription):**
+```json
+{
+  "has_subscription": false
+}
+```
+
+### Security Rules
+
+1. **Authentication Required**: Must use a valid JWT from Account Server
+2. **Trusted Service**: Your application must be in the trusted services list
+3. **Plan Restrictions**: Can only create subscriptions to:
+   - Plans owned by your organization
+   - Plans with `visibility: public`
+4. **Subscriber Scope**: You specify the subscriber; it's not derived from the JWT
+
+### Integration Example
+
+Here's how to auto-provision a subscription when a new organization signs up:
+
+```python
+import requests
+
+class BillingService:
+    def __init__(self, base_url, get_service_token):
+        self.base_url = base_url
+        self.get_service_token = get_service_token
+
+    def ensure_subscription(self, org_id, plan_id):
+        """Ensure organization has a subscription, create if needed."""
+        token = self.get_service_token()
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # Check if already subscribed
+        check_url = f"{self.base_url}/api/service/subscriptions/check"
+        params = {"subscriber_id": org_id, "subscriber_type": "organization"}
+
+        response = requests.get(check_url, headers=headers, params=params)
+        data = response.json()
+
+        if data["has_subscription"]:
+            return data["subscription"]
+
+        # Create subscription
+        create_url = f"{self.base_url}/api/service/subscriptions"
+        payload = {
+            "subscriber_id": org_id,
+            "subscriber_type": "organization",
+            "plan_id": plan_id
+        }
+
+        response = requests.post(create_url, headers=headers, json=payload)
+        return response.json()["data"]
+
+# Usage in your application
+billing = BillingService(
+    base_url="https://billing.example.com",
+    get_service_token=lambda: get_account_server_token()
+)
+
+# Auto-provision when org is created
+def on_organization_created(org_id):
+    subscription = billing.ensure_subscription(
+        org_id=org_id,
+        plan_id=os.environ["AUTO_TRIAL_PLAN_ID"]
+    )
+    print(f"Organization {org_id} subscribed to plan: {subscription['plan_id']}")
+```
+
+### Error Handling
+
+| Status | Error Code | Description |
+|--------|------------|-------------|
+| `401` | `unauthorized` | Invalid or missing JWT |
+| `403` | `not_trusted_service` | Your app is not in the trusted services list |
+| `403` | `plan_not_accessible` | Cannot create subscription to this plan |
+| `404` | `plan_not_found` | Plan ID does not exist |
+| `409` | `already_subscribed` | Subscriber already has this subscription |
 
 ---
 
