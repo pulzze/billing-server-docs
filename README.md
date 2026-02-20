@@ -7,20 +7,21 @@ This guide explains how to integrate your application with the Billing Server fo
 1. [Overview](#overview)
 2. [Authentication](#authentication)
 3. [Core Concepts](#core-concepts)
-4. [Quick Start](#quick-start)
-5. [API Reference](#api-reference)
-6. [Understanding Pricing](#understanding-pricing)
-7. [Usage Reporting](#usage-reporting)
-8. [Limit Enforcement](#limit-enforcement)
-9. [Subscription Lifecycle](#subscription-lifecycle)
-10. [Billing Cycles](#billing-cycles)
-11. [Payment Methods](#payment-methods)
-12. [Webhooks](#webhooks)
-13. [Best Practices](#best-practices)
-14. [Per-User Allocations](#per-user-allocations)
-15. [Balance-Type Metrics](#balance-type-metrics)
-16. [Per-User Usage Tracking](#per-user-usage-tracking)
-17. [Service-to-Service Authentication](#service-to-service-authentication)
+4. [Stripe Connect Setup](#stripe-connect-setup)
+5. [Quick Start](#quick-start)
+6. [API Reference](#api-reference)
+7. [Understanding Pricing](#understanding-pricing)
+8. [Usage Reporting](#usage-reporting)
+9. [Limit Enforcement](#limit-enforcement)
+10. [Subscription Lifecycle](#subscription-lifecycle)
+11. [Billing Cycles](#billing-cycles)
+12. [Payment Methods](#payment-methods)
+13. [Webhooks](#webhooks)
+14. [Best Practices](#best-practices)
+15. [Per-User Allocations](#per-user-allocations)
+16. [Balance-Type Metrics](#balance-type-metrics)
+17. [Per-User Usage Tracking](#per-user-usage-tracking)
+18. [Service-to-Service Authentication](#service-to-service-authentication)
 
 ---
 
@@ -36,14 +37,16 @@ The Billing Server provides:
 ### Architecture
 
 ```
-Your Application ──────► Billing Server ──────► Stripe
-       │                       │
-       │                       ▼
-       │                 Account Server
-       │                   (Identity)
+Your Application ──────► Billing Server ──────► Stripe Platform
+       │                       │                     │
+       │                       ▼                     ▼
+       │                 Account Server        Your Stripe Account
+       │                   (Identity)          (via Stripe Connect)
        ▼
    Your Users
 ```
+
+Each application connects its own Stripe account via Stripe Connect. Payments for subscriptions to your plans go directly to your connected Stripe account.
 
 Your application is responsible for:
 1. Authenticating users via Account Server
@@ -103,6 +106,11 @@ A **Payment Plan** defines pricing and limits for subscribers. Plans include:
 - Billing cycle configuration (monthly, quarterly, annual, or custom)
 - Upgrade/downgrade behavior
 
+**Plans are application-scoped**: Each plan belongs to a specific application, not an organization. This enables:
+- Multiple applications within one organization, each with its own plans
+- Each application can have its own Stripe account (via Stripe Connect)
+- Revenue goes directly to the application's connected Stripe account
+
 Plans have visibility settings:
 - **Private**: Only visible within the vendor's organization
 - **Public**: Discoverable by any organization
@@ -132,6 +140,159 @@ This is automatic—you don't need to manage snapshots directly.
 ### Usage Events
 
 A **Usage Event** records consumption of a metric. Your application reports usage after processing requests.
+
+---
+
+## Stripe Connect Setup
+
+Before creating plans or accepting payments, each application must connect a Stripe account using Stripe Connect. This allows your organization to receive payments directly to your own Stripe account.
+
+### Why Stripe Connect?
+
+- **Direct payments**: Revenue goes straight to your connected Stripe account
+- **Per-application accounts**: Different applications can use different Stripe accounts
+- **Full control**: Access your own Stripe dashboard for reporting and payouts
+
+### Connecting Your Stripe Account
+
+#### 1. Check Connection Status
+
+```
+GET /api/vendor/applications/{application_id}/stripe/status
+```
+
+Response (not connected):
+```json
+{
+  "data": {
+    "connected": false,
+    "application_id": "app_abc123"
+  }
+}
+```
+
+Response (connected):
+```json
+{
+  "data": {
+    "connected": true,
+    "application_id": "app_abc123",
+    "stripe_account_id": "acct_1234567890",
+    "status": "active",
+    "business_name": "Acme Corp",
+    "email": "billing@acme.com",
+    "charges_enabled": true,
+    "payouts_enabled": true,
+    "details_submitted": true,
+    "connected_at": "2024-01-15T10:30:00Z"
+  }
+}
+```
+
+#### 2. Initiate Connection
+
+```
+POST /api/vendor/applications/{application_id}/stripe/authorize
+```
+
+Request (optional prefill data):
+```json
+{
+  "email": "billing@yourcompany.com",
+  "business_name": "Your Company Inc",
+  "country": "US"
+}
+```
+
+Response:
+```json
+{
+  "data": {
+    "url": "https://connect.stripe.com/oauth/authorize?..."
+  }
+}
+```
+
+Redirect the user to the returned URL. After they authorize on Stripe, they'll be redirected back to your application.
+
+#### 3. Account Statuses
+
+| Status | Description | Can Accept Charges? |
+|--------|-------------|---------------------|
+| `pending` | Account created but onboarding incomplete | No |
+| `active` | Fully onboarded and operational | Yes |
+| `restricted` | Some capabilities limited | Check `charges_enabled` |
+| `disabled` | Account disabled by Stripe | No |
+| `disconnected` | Manually disconnected | No |
+
+### Managing Connected Accounts
+
+#### Sync Account Details
+
+Refresh the account status from Stripe (useful after onboarding changes):
+
+```
+POST /api/vendor/applications/{application_id}/stripe/sync
+```
+
+Response:
+```json
+{
+  "data": {
+    "application_id": "app_abc123",
+    "stripe_account_id": "acct_1234567890",
+    "status": "active",
+    "business_name": "Acme Corp",
+    "charges_enabled": true,
+    "payouts_enabled": true,
+    "details_submitted": true,
+    "last_synced_at": "2024-01-15T14:30:00Z"
+  }
+}
+```
+
+#### Access Stripe Dashboard
+
+Get a login link to your Stripe Express dashboard:
+
+```
+GET /api/vendor/applications/{application_id}/stripe/dashboard
+```
+
+Response:
+```json
+{
+  "data": {
+    "url": "https://connect.stripe.com/express/..."
+  }
+}
+```
+
+The link is valid for a single use and expires quickly.
+
+#### Disconnect Account
+
+```
+POST /api/vendor/applications/{application_id}/stripe/disconnect
+```
+
+Returns `204 No Content` on success.
+
+**Warning**: Disconnecting prevents the application from accepting new payments. Existing subscriptions will continue until their next billing cycle fails.
+
+### Stripe Connect Webhooks
+
+The Billing Server handles Stripe Connect webhooks automatically at:
+
+```
+POST /webhooks/stripe/connect/{stripe_account_id}
+```
+
+Events handled:
+- `account.updated` - Account status changes (onboarding completion, etc.)
+- `account.application.deauthorized` - User revoked access
+
+You don't need to implement these webhooks—the Billing Server manages account status automatically.
 
 ---
 
@@ -323,8 +484,9 @@ Response:
       "currency": "USD",
       "billing_period": "monthly",
       "vendor": {
-        "organization_id": "org_xyz",
-        "name": "Acme Corp"
+        "application_id": "app_xyz",
+        "application_name": "Acme API",
+        "organization_id": "org_xyz"
       }
     }
   ]
@@ -350,8 +512,9 @@ Response:
   "cycle_start": "anniversary",
   "payment_timing": "prepaid",
   "vendor": {
-    "organization_id": "org_xyz",
-    "name": "Acme Corp"
+    "application_id": "app_xyz",
+    "application_name": "Acme API",
+    "organization_id": "org_xyz"
   },
   "metrics": [
     {
@@ -502,6 +665,109 @@ Syncs your application's metric definitions with the billing server. This is the
 - Run sync during deployment (`mix billing.sync_metrics`)
 - Check `sync_successful` to fail deployments on breaking changes
 - Deprecated metrics continue to work for existing subscriptions
+
+---
+
+### Vendor Plan Management
+
+Plans are created and managed through the vendor API. Each plan belongs to an application and requires a connected Stripe account.
+
+#### Prerequisites
+
+Before creating plans:
+1. Your application must have a connected Stripe account (see [Stripe Connect Setup](#stripe-connect-setup))
+2. Register the metrics your plans will use (see [Metrics](#metrics))
+
+#### Create a Plan
+
+```
+POST /api/vendor/plans
+```
+
+Request:
+```json
+{
+  "application_id": "app_abc123",
+  "name": "Pro Monthly",
+  "description": "Professional plan with expanded limits",
+  "visibility": "public",
+  "base_price": "29.00",
+  "currency": "USD",
+  "billing_period": "monthly",
+  "payment_timing": "prepaid",
+  "trial_period_days": 14
+}
+```
+
+Response:
+```json
+{
+  "data": {
+    "id": "plan_xyz789",
+    "application_id": "app_abc123",
+    "name": "Pro Monthly",
+    "description": "Professional plan with expanded limits",
+    "visibility": "public",
+    "base_price": "29.00",
+    "currency": "USD",
+    "billing_period": "monthly",
+    "payment_timing": "prepaid",
+    "trial_period_days": 14,
+    "is_active": true,
+    "created_at": "2024-01-15T10:30:00Z"
+  }
+}
+```
+
+**Required Fields:**
+
+| Field | Description |
+|-------|-------------|
+| `application_id` | The application this plan belongs to (must have connected Stripe account) |
+| `name` | Display name for the plan |
+
+**Optional Fields:**
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `description` | null | Plan description |
+| `visibility` | `private` | `private`, `public`, or `unlisted` |
+| `base_price` | `0.00` | Base subscription fee |
+| `currency` | `USD` | Currency code |
+| `billing_period` | `monthly` | `monthly`, `quarterly`, `annual`, or `custom` |
+| `payment_timing` | `prepaid` | `prepaid`, `postpaid`, or `hybrid` |
+| `trial_period_days` | `0` | Free trial duration (0-365 days) |
+
+#### List Your Plans
+
+```
+GET /api/vendor/plans
+```
+
+Returns all plans owned by your applications.
+
+#### Update a Plan
+
+```
+PUT /api/vendor/plans/{plan_id}
+```
+
+**Note:** Changes to pricing or limits only affect new subscriptions. Existing subscriptions keep their original terms (plan snapshot).
+
+#### Delete a Plan
+
+```
+DELETE /api/vendor/plans/{plan_id}
+```
+
+Plans with active subscriptions cannot be deleted. Deactivate them instead:
+
+```json
+PUT /api/vendor/plans/{plan_id}
+{
+  "is_active": false
+}
+```
 
 ---
 
