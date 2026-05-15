@@ -161,6 +161,7 @@ Request:
 | `name` | Yes | — | Display name for the plan |
 | `description` | No | null | Plan description |
 | `visibility` | No | `"private"` | `"private"`, `"public"`, or `"unlisted"` |
+| `subscriber_scope` | No | `"any"` | `"user"`, `"organization"`, `"application"`, or `"any"`. Restricts which `subscriber_type` may subscribe. `"any"` (default) accepts all types; otherwise the subscription's `subscriber_type` must match this scope or creation/change is rejected with `incompatible_subscriber_type` (HTTP 422). |
 | `base_price` | No | `"0.00"` | Base subscription fee |
 | `currency` | No | `"USD"` | Currency code |
 | `billing_period` | No | `"monthly"` | `"monthly"`, `"quarterly"`, `"annual"`, or `"custom"` |

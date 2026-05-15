@@ -135,6 +135,8 @@ Starting status depends on the plan's payment timing:
 | Postpaid | `active` | Immediately (billed at cycle end) |
 | Hybrid | `pending` | After base fee payment succeeds |
 
+**Subscriber type compatibility.** If the plan declares a `subscriber_scope` other than `"any"` (e.g., `"user"`, `"organization"`, or `"application"`), the subscriber's type must match it. A mismatch returns HTTP 422 with `error.code = "incompatible_subscriber_type"`. The same check applies to `POST /api/subscriptions/{id}/change-plan`.
+
 ### Start a Trial
 
 ```
