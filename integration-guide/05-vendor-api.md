@@ -1,5 +1,7 @@
 # Vendor API
 
+_Last verified: 2026-06-18_
+
 Endpoints for application owners to manage metrics, plans, pricing, Stripe Connect, and webhook subscriptions.
 
 All endpoints are under `/api/vendor/` and require `Authorization: Bearer <jwt>`.

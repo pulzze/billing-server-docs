@@ -1,5 +1,7 @@
 # Reference
 
+_Last verified: 2026-06-18_
+
 Error handling, best practices, and SDK examples.
 
 ## Error Handling

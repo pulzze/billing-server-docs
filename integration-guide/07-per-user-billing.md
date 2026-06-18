@@ -1,5 +1,7 @@
 # Per-User Billing
 
+_Last verified: 2026-06-18_
+
 Manage individual limits and credit balances for end users within a subscription using **allocation profiles**.
 
 ## How It Works

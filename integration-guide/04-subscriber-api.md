@@ -1,5 +1,7 @@
 # Subscriber API
 
+_Last verified: 2026-06-18_
+
 Endpoints for subscribers to browse plans, manage subscriptions, check limits, report usage, and handle payments.
 
 All endpoints require `Authorization: Bearer <jwt>` unless noted otherwise.

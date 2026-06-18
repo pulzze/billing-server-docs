@@ -1,5 +1,7 @@
 # Quick Start
 
+_Last verified: 2026-06-18_
+
 Minimal steps to integrate billing into your application.
 
 ## 1. Register Your Metrics

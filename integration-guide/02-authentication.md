@@ -1,5 +1,7 @@
 # Authentication
 
+_Last verified: 2026-06-18_
+
 All API requests (except public endpoints) require a valid JWT token from Account Server.
 
 ## Token Types

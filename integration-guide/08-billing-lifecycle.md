@@ -1,5 +1,7 @@
 # Billing Lifecycle
 
+_Last verified: 2026-06-18_
+
 Understanding subscription states, billing cycles, and payment handling.
 
 ## Subscription States

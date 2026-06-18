@@ -1,5 +1,7 @@
 # Overview
 
+_Last verified: 2026-06-18_
+
 This guide explains how to integrate your application with the Billing Server for usage tracking, limit enforcement, and billing.
 
 ## What the Billing Server Provides

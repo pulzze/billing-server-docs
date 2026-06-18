@@ -1,5 +1,7 @@
 # Service API
 
+_Last verified: 2026-06-18_
+
 Endpoints for trusted backend services to manage subscriptions, check limits, and report usage on behalf of subscribers. All endpoints are under `/api/service/` and require an **app-type JWT**.
 
 See [Authentication](02-authentication.md#service-to-service-authentication) for how to obtain a service token.
